@@ -1,0 +1,98 @@
+name: Build and Release
+
+on:
+  push:
+    tags:
+      - 'v*'  # 当推送 v 开头的 tag 时触发，如 v1.0.0
+  workflow_dispatch:  # 允许手动触发
+
+jobs:
+  build:
+    name: Build on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller
+      
+      - name: Download FFmpeg (Ubuntu)
+        if: matrix.os == 'ubuntu-latest'
+        run: python download_ffmpeg.py --platform linux
+      
+      - name: Download FFmpeg (Windows)
+        if: matrix.os == 'windows-latest'
+        run: python download_ffmpeg.py --platform windows
+      
+      - name: Download FFmpeg (macOS)
+        if: matrix.os == 'macos-latest'
+        run: python download_ffmpeg.py --platform macos
+      
+      - name: Build application
+        run: python build.py
+      
+      - name: Upload artifact (Ubuntu)
+        if: matrix.os == 'ubuntu-latest'
+        uses: actions/upload-artifact@v4
+        with:
+          name: video-cutter-linux
+          path: dist/*
+      
+      - name: Upload artifact (Windows)
+        if: matrix.os == 'windows-latest'
+        uses: actions/upload-artifact@v4
+        with:
+          name: video-cutter-windows
+          path: dist/*
+      
+      - name: Upload artifact (macOS)
+        if: matrix.os == 'macos-latest'
+        uses: actions/upload-artifact@v4
+        with:
+          name: video-cutter-macos
+          path: dist/*
+
+  release:
+    name: Create Release
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      
+      - name: Create release archives
+        run: |
+          cd artifacts
+          # Linux
+          tar -czvf video-cutter-linux.tar.gz -C video-cutter-linux .
+          # Windows
+          cd video-cutter-windows && zip -r ../video-cutter-windows.zip . && cd ..
+          # macOS (zip the app bundle)
+          cd video-cutter-macos && zip -r ../video-cutter-macos.zip . && cd ..
+      
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: |
+            artifacts/video-cutter-linux.tar.gz
+            artifacts/video-cutter-windows.zip
+            artifacts/video-cutter-macos.zip
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

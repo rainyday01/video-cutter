@@ -1,0 +1,300 @@
+"""Video processing using ffmpeg."""
+import json
+import subprocess
+from dataclasses import dataclass
+from datetime import datetime, timedelta
+from pathlib import Path
+from typing import Callable
+
+from .utils import parse_video_filename
+from .ffmpeg_manager import get_ffmpeg_path, get_ffprobe_path
+
+
+@dataclass
+class VideoInfo:
+    """Video file information."""
+    path: Path
+    start_time: datetime
+    duration: float  # seconds
+    width: int
+    height: int
+    bitrate: int  # bits per second
+    fps: float
+
+
+@dataclass
+class ClipTask:
+    """A video clip extraction task."""
+    clip_start: datetime
+    clip_end: datetime
+    description: str
+    output_path: Path
+    video_info: VideoInfo | None = None
+    status: str = "pending"  # pending, processing, completed, failed, skipped
+    progress: float = 0.0
+    error: str | None = None
+
+
+@dataclass
+class QualitySettings:
+    """Video quality settings."""
+    name: str
+    bitrate_ratio: float  # ratio of original bitrate
+    
+    @classmethod
+    def high(cls) -> 'QualitySettings':
+        return cls("高", 1.0)
+    
+    @classmethod
+    def medium(cls) -> 'QualitySettings':
+        return cls("中", 0.5)
+    
+    @classmethod
+    def low(cls) -> 'QualitySettings':
+        return cls("低", 0.3)
+
+
+def get_video_info(video_path: Path) -> VideoInfo | None:
+    """
+    Get video information using ffprobe.
+    
+    Args:
+        video_path: Path to video file
+    
+    Returns:
+        VideoInfo object or None if failed
+    """
+    try:
+        ffprobe_path = get_ffprobe_path()
+        cmd = [
+            ffprobe_path,
+            '-v', 'quiet',
+            '-print_format', 'json',
+            '-show_format',
+            '-show_streams',
+            str(video_path)
+        ]
+        
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        
+        if result.returncode != 0:
+            return None
+        
+        data = json.loads(result.stdout)
+        
+        # Find video stream
+        video_stream = None
+        for stream in data.get('streams', []):
+            if stream.get('codec_type') == 'video':
+                video_stream = stream
+                break
+        
+        if not video_stream:
+            return None
+        
+        # Parse start time from filename
+        start_time = parse_video_filename(video_path.name)
+        if not start_time:
+            return None
+        
+        duration = float(data.get('format', {}).get('duration', 0))
+        width = int(video_stream.get('width', 0))
+        height = int(video_stream.get('height', 0))
+        bitrate = int(data.get('format', {}).get('bit_rate', 0))
+        
+        # Parse fps
+        fps_str = video_stream.get('r_frame_rate', '30/1')
+        if '/' in fps_str:
+            num, den = fps_str.split('/')
+            fps = float(num) / float(den) if float(den) > 0 else 30.0
+        else:
+            fps = float(fps_str)
+        
+        return VideoInfo(
+            path=video_path,
+            start_time=start_time,
+            duration=duration,
+            width=width,
+            height=height,
+            bitrate=bitrate,
+            fps=fps
+        )
+        
+    except Exception as e:
+        print(f"Error getting video info: {e}")
+        return None
+
+
+class VideoProcessor:
+    """Handles video cutting operations."""
+    
+    def __init__(self):
+        self._process: subprocess.Popen | None = None
+        self._paused: bool = False
+        self._stopped: bool = False
+        self.current_task: ClipTask | None = None
+    
+    def find_video_for_clip(
+        self,
+        videos: list[VideoInfo],
+        clip_start: datetime,
+        clip_end: datetime
+    ) -> VideoInfo | None:
+        """
+        Find the source video that contains the clip time range.
+        
+        Args:
+            videos: List of available video info
+            clip_start: Clip start time
+            clip_end: Clip end time
+        
+        Returns:
+            VideoInfo or None if no video covers the time range
+        """
+        for video in videos:
+            video_end = video.start_time + timedelta(seconds=video.duration)
+            
+            # Check if video covers the clip time range
+            if video.start_time <= clip_start and clip_end <= video_end:
+                return video
+        
+        return None
+    
+    def calculate_seek_time(self, video: VideoInfo, clip_start: datetime) -> float:
+        """Calculate seek time in seconds from video start."""
+        delta = clip_start - video.start_time
+        return delta.total_seconds()
+    
+    def cut_clip(
+        self,
+        task: ClipTask,
+        quality: QualitySettings,
+        progress_callback: Callable[[float], None] | None = None,
+        log_callback: Callable[[str], None] | None = None
+    ) -> bool:
+        """
+        Cut a video clip using ffmpeg.
+        
+        Args:
+            task: ClipTask to process
+            quality: Quality settings
+            progress_callback: Callback for progress updates (0.0 - 1.0)
+            log_callback: Callback for log messages
+        
+        Returns:
+            True if successful, False otherwise
+        """
+        if not task.video_info:
+            task.status = "failed"
+            task.error = "No source video found"
+            return False
+        
+        video = task.video_info
+        
+        # Calculate seek time and duration
+        seek_time = self.calculate_seek_time(video, task.clip_start)
+        duration = (task.clip_end - task.clip_start).total_seconds()
+        
+        # Calculate output bitrate
+        output_bitrate = int(video.bitrate * quality.bitrate_ratio)
+        
+        # Ensure output directory exists
+        task.output_path.parent.mkdir(parents=True, exist_ok=True)
+        
+        # Build ffmpeg command
+        ffmpeg_path = get_ffmpeg_path()
+        cmd = [
+            ffmpeg_path,
+            '-y',  # Overwrite output
+            '-ss', str(seek_time),  # Seek to start
+            '-i', str(video.path),  # Input file
+            '-t', str(duration),  # Duration
+            '-c:v', 'libx264',  # Video codec
+            '-preset', 'medium',  # Encoding speed
+            '-b:v', str(output_bitrate),  # Video bitrate
+            '-c:a', 'aac',  # Audio codec
+            '-b:a', '128k',  # Audio bitrate
+            '-movflags', '+faststart',  # Enable streaming
+            '-progress', 'pipe:1',  # Progress output
+            str(task.output_path)
+        ]
+        
+        if log_callback:
+            log_callback(f"开始生成: {task.description}.mp4")
+        
+        try:
+            self._process = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True
+            )
+            
+            task.status = "processing"
+            
+            # Parse progress from ffmpeg output
+            while True:
+                if self._stopped:
+                    self._process.kill()
+                    task.status = "failed"
+                    task.error = "Task stopped"
+                    return False
+                
+                while self._paused:
+                    import time
+                    time.sleep(0.1)
+                
+                line = self._process.stdout.readline()
+                if not line:
+                    break
+                
+                # Parse progress
+                if line.startswith('out_time_ms'):
+                    try:
+                        out_time_us = int(line.split('=')[1])
+                        progress = min(1.0, out_time_us / 1000000 / duration)
+                        task.progress = progress
+                        if progress_callback:
+                            progress_callback(progress)
+                    except (ValueError, ZeroDivisionError):
+                        pass
+            
+            self._process.wait()
+            
+            if self._process.returncode == 0:
+                task.status = "completed"
+                task.progress = 1.0
+                if progress_callback:
+                    progress_callback(1.0)
+                return True
+            else:
+                task.status = "failed"
+                stderr = self._process.stderr.read() if self._process.stderr else ""
+                task.error = stderr[:500] if stderr else "Unknown error"
+                return False
+                
+        except Exception as e:
+            task.status = "failed"
+            task.error = str(e)
+            return False
+        finally:
+            self._process = None
+    
+    def pause(self):
+        """Pause current task."""
+        self._paused = True
+    
+    def resume(self):
+        """Resume paused task."""
+        self._paused = False
+    
+    def stop(self):
+        """Stop current task."""
+        self._stopped = True
+        if self._process:
+            self._process.kill()
+    
+    def reset(self):
+        """Reset processor state."""
+        self._paused = False
+        self._stopped = False
