@@ -199,11 +199,11 @@ def download_ffmpeg(target_platform: str | None = None) -> bool:
         success = download_for_linux(target_dir)
     
     if success:
-        print(f"\n✓ ffmpeg binaries downloaded to: {target_dir}")
+        print(f"\n[OK] ffmpeg binaries downloaded to: {target_dir}")
         print(f"  - ffmpeg: {(target_dir / FFMPEG_URLS[target_platform]['ffmpeg']).exists()}")
         print(f"  - ffprobe: {(target_dir / FFMPEG_URLS[target_platform]['ffprobe']).exists()}")
     else:
-        print(f"\n✗ Failed to download ffmpeg")
+        print(f"\n[FAIL] Failed to download ffmpeg")
     
     return success
 
