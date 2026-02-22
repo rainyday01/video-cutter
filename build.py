@@ -70,10 +70,10 @@ def check_ffmpeg_bundled() -> bool:
         ffprobe = ffmpeg_dir / "ffprobe"
     
     if ffmpeg.exists() and ffprobe.exists():
-        print(f"✓ Found bundled ffmpeg: {ffmpeg_dir}")
+        print(f"[OK] Found bundled ffmpeg: {ffmpeg_dir}")
         return True
     else:
-        print(f"✗ Bundled ffmpeg not found: {ffmpeg_dir}")
+        print(f"[WARN] Bundled ffmpeg not found: {ffmpeg_dir}")
         print("  Run 'python download_ffmpeg.py' to download ffmpeg binaries")
         return False
 
@@ -87,10 +87,10 @@ def build_pyinstaller(one_file: bool = True, windowed: bool = True):
         print("Error: PyInstaller not found. Install with: pip install pyinstaller")
         return False
     
-    # Build command
+    # Build command - use ASCII-safe name
     cmd = [
         "pyinstaller",
-        "--name", "视频剪辑工具",
+        "--name", "VideoCutter",
         "--clean",
     ]
     
@@ -142,7 +142,7 @@ def build_pyinstaller(one_file: bool = True, windowed: bool = True):
     result = subprocess.run(cmd, cwd=root)
     
     if result.returncode == 0:
-        print("\n✓ Build successful!")
+        print("\n[OK] Build successful!")
         dist_dir = root / "dist"
         if one_file:
             print(f"  Executable: {dist_dir}")
@@ -150,7 +150,7 @@ def build_pyinstaller(one_file: bool = True, windowed: bool = True):
             print(f"  App bundle: {dist_dir}")
         return True
     else:
-        print("\n✗ Build failed!")
+        print("\n[FAIL] Build failed!")
         return False
 
 
