@@ -204,6 +204,12 @@ python download_ffmpeg.py --check-ffmpeg
 
 ## 更新日志
 
+### v1.0.8
+- 🔧 重写 FFmpeg 输出读取逻辑
+- 🧵 使用独立线程读取 stderr
+- ⏱️ 添加空行时的短暂延迟避免 CPU 占用
+- 📝 更多日志细节
+
 ### v1.0.7
 - 📝 增强 FFmpeg 执行过程日志
 - 🔍 每隔100行输出进度状态

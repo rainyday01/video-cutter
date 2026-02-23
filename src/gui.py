@@ -726,17 +726,20 @@ class VideoCutterWindow(QMainWindow):
     
     def on_progress_updated(self, progress: float):
         """Handle progress update from worker."""
-        # Update current task progress in table
-        if self.worker and self.worker.current_task:
-            task = self.worker.current_task
-            task.progress = progress
-            
-            # Find row in table
-            for row in range(self.task_table.rowCount()):
-                if self.task_table.item(row, 0).text() == task.description:
-                    self.task_table.item(row, 2).setText(f"{int(progress * 100)}%")
-                    self.task_table.item(row, 2).setData(Qt.ItemDataRole.UserRole, progress)
-                    break
+        try:
+            # Update current task progress in table
+            if self.worker and hasattr(self.worker, 'current_task') and self.worker.current_task:
+                task = self.worker.current_task
+                task.progress = progress
+                
+                # Find row in table
+                for row in range(self.task_table.rowCount()):
+                    if self.task_table.item(row, 0).text() == task.description:
+                        self.task_table.item(row, 2).setText(f"{int(progress * 100)}%")
+                        self.task_table.item(row, 2).setData(Qt.ItemDataRole.UserRole, progress)
+                        break
+        except Exception as e:
+            self.logger.error(f"on_progress_updated error: {e}")
     
     def on_log_message(self, message: str):
         """Handle log message from worker."""

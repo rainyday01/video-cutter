@@ -304,11 +304,27 @@ class VideoProcessor:
             
             task.status = "processing"
             
-            # Parse progress from ffmpeg output
+            # Use a simple approach: read stderr in a thread, wait for process
+            import threading
+            
+            stderr_output = []
+            
+            def read_stderr():
+                try:
+                    for line in self._process.stderr:
+                        stderr_output.append(line)
+                except:
+                    pass
+            
+            stderr_thread = threading.Thread(target=read_stderr, daemon=True)
+            stderr_thread.start()
+            
+            # Read stdout for progress
             line_count = 0
             last_progress_log = 0
             
             logger.debug("Entering readline loop...")
+            
             while True:
                 if self._stopped:
                     logger.warning("Task stopped during processing")
@@ -321,25 +337,30 @@ class VideoProcessor:
                     import time
                     time.sleep(0.1)
                 
-                # Check if process is still running
+                # Check if process has ended
                 poll_result = self._process.poll()
                 if poll_result is not None:
-                    logger.info(f"Process ended during readline loop, return code: {poll_result}")
+                    logger.info(f"Process ended, return code: {poll_result}")
                     break
                 
                 try:
                     line = self._process.stdout.readline()
                 except Exception as read_err:
                     logger.error(f"readline() error: {read_err}")
-                    break
+                    import time
+                    time.sleep(0.1)
+                    continue
+                
+                if not line:
+                    # Empty line might mean process ended or buffer empty
+                    import time
+                    time.sleep(0.05)  # Small delay before checking again
+                    continue
                 
                 line_count += 1
-                if not line:
-                    logger.debug(f"readline() returned empty after {line_count} lines")
-                    break
                 
                 # Log first few lines and every 100 lines
-                if line_count <= 5:
+                if line_count <= 10:
                     logger.debug(f"FFmpeg output line {line_count}: {line.strip()}")
                 elif line_count % 100 == 0:
                     logger.debug(f"FFmpeg output line {line_count} (progress continues...)")
@@ -371,11 +392,11 @@ class VideoProcessor:
             
             logger.info(f"FFmpeg process finished with return code: {return_code}")
             
-            # Read any remaining stderr
-            if self._process.stderr:
-                stderr_output = self._process.stderr.read()
-                if stderr_output:
-                    logger.debug(f"FFmpeg stderr: {stderr_output[:1000]}")
+            # Get stderr output
+            stderr_thread.join(timeout=1.0)
+            if stderr_output:
+                stderr_text = ''.join(stderr_output)
+                logger.debug(f"FFmpeg stderr: {stderr_text[:1000]}")
             
             if return_code == 0:
                 task.status = "completed"
