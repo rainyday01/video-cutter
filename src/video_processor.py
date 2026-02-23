@@ -304,10 +304,21 @@ class VideoProcessor:
             
             task.status = "processing"
             
-            # Use a simple approach: read stderr in a thread, wait for process
+            # Use threads to read stdout and stderr with timeout capability
             import threading
+            import queue
             
+            stdout_queue = queue.Queue()
             stderr_output = []
+            
+            def read_stdout():
+                try:
+                    for line in self._process.stdout:
+                        stdout_queue.put(line)
+                except:
+                    pass
+                finally:
+                    stdout_queue.put(None)  # Signal end
             
             def read_stderr():
                 try:
@@ -316,12 +327,16 @@ class VideoProcessor:
                 except:
                     pass
             
+            stdout_thread = threading.Thread(target=read_stdout, daemon=True)
             stderr_thread = threading.Thread(target=read_stderr, daemon=True)
+            stdout_thread.start()
             stderr_thread.start()
             
-            # Read stdout for progress
+            # Read stdout for progress with timeout
             line_count = 0
             last_progress_log = 0
+            last_activity_time = __import__('time').time()
+            timeout_seconds = 30  # If no activity for 30 seconds, check process
             
             logger.debug("Entering readline loop...")
             
@@ -341,22 +356,40 @@ class VideoProcessor:
                 poll_result = self._process.poll()
                 if poll_result is not None:
                     logger.info(f"Process ended, return code: {poll_result}")
+                    # Drain remaining stdout
+                    while True:
+                        try:
+                            line = stdout_queue.get(timeout=0.1)
+                            if line is None:
+                                break
+                            line_count += 1
+                        except:
+                            break
                     break
                 
+                # Try to get a line with timeout
                 try:
-                    line = self._process.stdout.readline()
-                except Exception as read_err:
-                    logger.error(f"readline() error: {read_err}")
-                    import time
-                    time.sleep(0.1)
+                    line = stdout_queue.get(timeout=0.5)
+                except:
+                    # Timeout - check if process is still alive
+                    current_time = __import__('time').time()
+                    if current_time - last_activity_time > timeout_seconds:
+                        logger.warning(f"No stdout activity for {timeout_seconds}s, checking process...")
+                        poll_result = self._process.poll()
+                        if poll_result is not None:
+                            logger.info(f"Process completed (return code: {poll_result})")
+                            break
+                        # Process still running, reset timer and wait more
+                        last_activity_time = current_time
+                        logger.debug("Process still running, continuing to wait...")
                     continue
                 
-                if not line:
-                    # Empty line might mean process ended or buffer empty
-                    import time
-                    time.sleep(0.05)  # Small delay before checking again
-                    continue
+                if line is None:
+                    # End of stream
+                    logger.info("stdout stream ended")
+                    break
                 
+                last_activity_time = __import__('time').time()
                 line_count += 1
                 
                 # Log first few lines and every 100 lines
