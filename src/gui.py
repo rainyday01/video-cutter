@@ -387,15 +387,16 @@ class VideoCutterWindow(QMainWindow):
             self.excel_path = Path(file)
             self.excel_path_edit.setText(str(self.excel_path))
             
-            # Parse Excel
-            self.clip_definitions = parse_excel_clips(self.excel_path)
+            # Parse Excel with debug logging
+            self.log("正在解析 Excel 文件...")
+            self.clip_definitions = parse_excel_clips(self.excel_path, debug=True)
             
             if self.clip_definitions:
                 count = len(self.clip_definitions)
                 self.clip_count_label.setText(f"待剪切 {count} 个片段")
                 self.clip_count_label.setStyleSheet("color: green;")
                 
-                self.log(f"已加载 {count} 个片段")
+                self.log(f"✓ 已加载 {count} 个片段")
                 
                 # Update task table
                 self.update_task_table()
@@ -403,6 +404,7 @@ class VideoCutterWindow(QMainWindow):
                 self.clip_count_label.setText("未能解析到片段信息")
                 self.clip_count_label.setStyleSheet("color: red;")
                 self.clip_definitions = []
+                self.log("✗ 解析失败，请查看上方日志了解原因")
             
             self.update_start_button()
     
