@@ -46,54 +46,72 @@ class WorkerThread(QThread):
     
     def run(self):
         """Process all tasks."""
-        # Assign video info to each task
-        for task in self.tasks:
-            if not self._running:
-                break
-            
-            # Resume from paused state
-            while self._paused and self._running:
-                import time
-                time.sleep(0.1)
-            
-            if not self._running:
-                break
-            
-            # Apply offset to clip times
-            adjusted_start, adjusted_end = self.processor.apply_time_offset(
-                task.clip_start, task.clip_end, self.offset
-            )
-            
-            # Update task with adjusted times
-            original_duration = (task.clip_end - task.clip_start).total_seconds()
-            new_duration = (adjusted_end - adjusted_start).total_seconds()
-            if new_duration != original_duration:
-                self.log_message.emit(f"时间偏移: {task.description} ({original_duration:.1f}s → {new_duration:.1f}s)")
-            
-            task.clip_start = adjusted_start
-            task.clip_end = adjusted_end
-            
-            # Find source video for this task
-            task.video_info = self.processor.find_video_for_clip(
-                self.video_infos, task.clip_start, task.clip_end
-            )
-            
-            if task.video_info:
-                self.processor.cut_clip(
-                    task, self.quality,
-                    progress_callback=lambda p: self.progress_updated.emit(p),
-                    log_callback=lambda msg: self.log_message.emit(msg)
-                )
+        try:
+            # Assign video info to each task
+            for task in self.tasks:
+                if not self._running:
+                    break
                 
-                success = task.status == "completed"
-                self.task_completed.emit(task.description, success)
-            else:
-                task.status = "failed"
-                task.error = "找不到源视频"
-                self.log_message.emit(f"失败: {task.description} - 找不到源视频")
-                self.task_completed.emit(task.description, False)
-        
-        if self._running:
+                # Resume from paused state
+                while self._paused and self._running:
+                    import time
+                    time.sleep(0.1)
+                
+                if not self._running:
+                    break
+                
+                try:
+                    # Apply offset to clip times
+                    adjusted_start, adjusted_end = self.processor.apply_time_offset(
+                        task.clip_start, task.clip_end, self.offset
+                    )
+                    
+                    # Update task with adjusted times
+                    original_duration = (task.clip_end - task.clip_start).total_seconds()
+                    new_duration = (adjusted_end - adjusted_start).total_seconds()
+                    if new_duration != original_duration:
+                        self.log_message.emit(f"时间偏移: {task.description} ({original_duration:.1f}s → {new_duration:.1f}s)")
+                    
+                    task.clip_start = adjusted_start
+                    task.clip_end = adjusted_end
+                    
+                    # Find source video for this task
+                    task.video_info = self.processor.find_video_for_clip(
+                        self.video_infos, task.clip_start, task.clip_end
+                    )
+                    
+                    if task.video_info:
+                        self.log_message.emit(f"处理: {task.description} (源: {task.video_info.path.name})")
+                        self.processor.cut_clip(
+                            task, self.quality,
+                            progress_callback=lambda p: self.progress_updated.emit(p),
+                            log_callback=lambda msg: self.log_message.emit(msg)
+                        )
+                        
+                        success = task.status == "completed"
+                        self.task_completed.emit(task.description, success)
+                    else:
+                        task.status = "failed"
+                        task.error = "找不到源视频"
+                        self.log_message.emit(f"失败: {task.description} - 找不到匹配的源视频")
+                        self.log_message.emit(f"  片段时间: {task.clip_start} ~ {task.clip_end}")
+                        self.task_completed.emit(task.description, False)
+                        
+                except Exception as e:
+                    import traceback
+                    task.status = "failed"
+                    task.error = str(e)
+                    self.log_message.emit(f"异常: {task.description} - {str(e)}")
+                    self.log_message.emit(traceback.format_exc())
+                    self.task_completed.emit(task.description, False)
+            
+            if self._running:
+                self.all_completed.emit()
+                
+        except Exception as e:
+            import traceback
+            self.log_message.emit(f"严重错误: {str(e)}")
+            self.log_message.emit(traceback.format_exc())
             self.all_completed.emit()
     
     def pause(self):
@@ -403,14 +421,18 @@ class VideoCutterWindow(QMainWindow):
             if videos:
                 # Get video info for each file
                 self.video_infos = []
+                self.log(f"正在扫描 {len(videos)} 个视频文件...")
+                
                 for video_path in videos:
                     info = None
                     # Try to get video info (requires ffprobe)
                     try:
                         from .video_processor import get_video_info
                         info = get_video_info(video_path)
-                    except:
-                        pass
+                        if info:
+                            self.log(f"  ✓ {video_path.name} (时长: {info.duration:.1f}s)")
+                    except Exception as e:
+                        self.log(f"  ⚠ {video_path.name} (获取信息失败: {e})")
                     
                     if info:
                         self.video_infos.append(info)
@@ -424,6 +446,9 @@ class VideoCutterWindow(QMainWindow):
                                 duration=0,  # Unknown
                                 width=0, height=0, bitrate=0, fps=0
                             ))
+                            self.log(f"  ✓ {video_path.name} (开始: {start_time}, 时长: 未知)")
+                        else:
+                            self.log(f"  ✗ {video_path.name} (无法解析文件名时间)")
                 
                 count = len(self.video_infos)
                 self.video_count_label.setText(f"发现 {count} 个视频文件")

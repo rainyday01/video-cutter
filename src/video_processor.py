@@ -193,8 +193,22 @@ class VideoProcessor:
         Returns:
             VideoInfo or None if no video covers the time range
         """
-        for video in videos:
-            video_end = video.start_time + timedelta(seconds=video.duration)
+        clip_duration = (clip_end - clip_start).total_seconds()
+        
+        # Sort videos by start time for better matching
+        sorted_videos = sorted(videos, key=lambda v: v.start_time)
+        
+        for i, video in enumerate(sorted_videos):
+            # Handle videos with unknown duration (duration=0)
+            if video.duration <= 0:
+                # Use next video's start time as end time, or assume 24 hours
+                if i + 1 < len(sorted_videos):
+                    video_end = sorted_videos[i + 1].start_time
+                else:
+                    # Last video: assume it covers until end of day + 1
+                    video_end = video.start_time + timedelta(hours=25)
+            else:
+                video_end = video.start_time + timedelta(seconds=video.duration)
             
             # Check if video covers the clip time range
             if video.start_time <= clip_start and clip_end <= video_end:
