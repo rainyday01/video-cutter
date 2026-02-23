@@ -86,6 +86,7 @@ class WorkerThread(QThread):
         self.offset = offset or OffsetSettings.default()
         self._running = True
         self._paused = False
+        self.current_task: ClipTask | None = None  # Track current task for progress display
     
     def run(self):
         """Process all tasks."""
@@ -98,6 +99,9 @@ class WorkerThread(QThread):
             # Assign video info to each task
             for i, task in enumerate(self.tasks):
                 logger.info(f"Processing task {i+1}/{len(self.tasks)}: {task.description}")
+                
+                # Set current task for progress tracking
+                self.current_task = task
                 
                 if not self._running:
                     logger.info("Worker stopped, exiting loop")

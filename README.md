@@ -204,6 +204,10 @@ python download_ffmpeg.py --check-ffmpeg
 
 ## 更新日志
 
+### v1.0.6
+- 🐛 **修复关键 bug**: `WorkerThread` 缺少 `current_task` 属性导致程序崩溃
+- 这是导致"只完成一个任务就退出"的真正原因！
+
 ### v1.0.5
 - 📝 增强 FFmpeg 执行日志（记录每一行输出）
 - 🔧 添加 Qt 消息处理器捕获 Qt 内部错误
