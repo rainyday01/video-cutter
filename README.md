@@ -10,7 +10,7 @@
 - 🎚️ 三种输出质量等级（高/中/低）
 - 📈 实时进度显示和剩余时间估算
 - ⏸️ 支持暂停/继续/停止
-- 📝 任务日志记录
+- 📝 任务日志记录（含 Excel 解析调试日志）
 - 🖥️ 跨平台支持 (Windows/macOS/Linux)
 - 📦 可打包成独立可执行文件（内置 ffmpeg）
 
@@ -33,7 +33,11 @@ pip install -r requirements.txt
 python main.py
 ```
 
-### 方式二：打包为可执行文件
+### 方式二：下载发布版本
+
+从 [Releases](https://github.com/rainyday01/video-cutter/releases) 页面下载对应平台的可执行文件。
+
+### 方式三：打包为可执行文件
 
 打包后的程序**内置 ffmpeg**，用户无需安装任何依赖。
 
@@ -76,9 +80,9 @@ python build.py --console      # 带控制台窗口（调试用）
 #### 4. 输出
 
 打包完成后，可执行文件在 `dist/` 目录：
-- **Windows**: `dist/视频剪辑工具.exe`
-- **macOS**: `dist/视频剪辑工具.app`
-- **Linux**: `dist/视频剪辑工具`
+- **Windows**: `dist/VideoCutter.exe`
+- **macOS**: `dist/VideoCutter.app`
+- **Linux**: `dist/VideoCutter`
 
 ## 使用方法
 
@@ -91,19 +95,47 @@ python build.py --console      # 带控制台窗口（调试用）
 ## Excel 表格格式
 
 表格应包含以下列：
-- **起始时间点**：格式 `起 yyyy-mm-dd hh:mm:ss 止 yyyy-mm-dd hh:mm:ss`
-- **问题描述**：片段命名（作为输出文件名）
+- **时间列**：支持多种表头名称（起止时间点、起始时间、开始时间等）
+- **描述列**：支持多种表头名称（问题描述、描述、标题等）
 
-示例：
-| 起始时间点 | 问题描述 |
-|-----------|---------|
-| 起 2026-01-15 10:45:02 止 2026-01-15 11:30:00 | 上午会议记录 |
+### 时间格式支持
+
+时间列支持多种格式：
+
+```
+起 2026-01-15 10:45:02 止 2026-01-15 11:30:00     # 标准格式
+起 2026/01/15 10:45:02 止 2026/01/15 11:30:00     # 斜杠日期
+起 2026.01.15 10:45:02 止 2026.01.15 11:30:00     # 点号日期
+```
+
+**分隔符支持**：
+- 空格分隔
+- 换行符分隔（`\n`、`\r\n`）
+- 无分隔符直接连接（`起xxx止xxx`）
+
+### 示例表格
+
+| 问题描述 | 起止时间点 |
+|---------|-----------|
+| 上午会议记录 | 起 2026-01-15 10:45:02 止 2026-01-15 11:30:00 |
+| 下午讨论 | 起 2026-01-15 14:00:00 止 2026-01-15 15:30:00 |
+
+### 调试 Excel 解析
+
+如果 Excel 解析有问题，可以使用测试脚本诊断：
+
+```bash
+python test_excel_parser.py 你的文件.xlsx
+```
+
+脚本会输出详细的解析日志，帮助定位问题。
 
 ## 视频文件命名
 
 视频文件应按开始时间命名：
 - `2026-01-15 10-45-02.mkv`
 - `2026.01.15_10.45.02.mp4`
+- `2026/01/15 10.45.02.mov`
 
 ## 输出质量
 
@@ -125,7 +157,7 @@ video-cutter/
 ├── src/
 │   ├── gui.py           # PyQt6 主界面
 │   ├── video_processor.py  # ffmpeg 视频处理
-│   ├── excel_parser.py  # Excel 解析
+│   ├── excel_parser.py  # Excel 解析（含调试日志）
 │   ├── ffmpeg_manager.py   # ffmpeg 路径管理
 │   └── utils.py         # 工具函数
 ├── ffmpeg_bin/          # ffmpeg 二进制文件（打包时）
@@ -148,15 +180,32 @@ python main.py
 # 检查 ffmpeg
 python -c "from src.ffmpeg_manager import check_ffmpeg; print(check_ffmpeg())"
 
+# 测试 Excel 解析
+python test_excel_parser.py test.xlsx
+
 # 测试下载 ffmpeg
 python download_ffmpeg.py --check-ffmpeg
 ```
 
+## 更新日志
+
+### v1.0.1
+- 📊 支持"起止时间点"等更多 Excel 表头格式
+- 🔧 处理多种时间分隔符（换行、回车、无空格）
+- 📝 添加详细解析日志便于调试
+- 🛠️ 新增 `test_excel_parser.py` 测试脚本
+
+### v1.0.0
+- 🎉 初始发布
+- ✂️ 基本视频剪辑功能
+- 📊 Excel 表格导入
+- 🖥️ 跨平台支持
+
 ## 分发
 
 将 `dist/` 目录中的可执行文件分发给用户：
-- **Windows**: 直接发送 `视频剪辑工具.exe`
-- **macOS**: 压缩 `视频剪辑工具.app` 为 zip
+- **Windows**: 直接发送 `VideoCutter.exe`
+- **macOS**: 压缩 `VideoCutter.app` 为 zip
 - **Linux**: 发送可执行文件
 
 用户无需安装 Python、ffmpeg 或任何其他依赖。
