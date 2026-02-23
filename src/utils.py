@@ -9,12 +9,15 @@ def parse_video_filename(filename: str) -> datetime | None:
     Parse video filename to extract start time.
     
     Supports formats:
-    - 2026-01-15 10-45-02.mkv
+    - 2026-01-15 10-45-02.mkv (OBS style)
     - 2026.01.15 10.45.02.mp4
     - 2026-01-15_10-45-00.MOV
+    - 2026/2/1 16:01:33.mp4 (dashcam style, flexible month/day)
+    - 2026/02/01 16:01:33.mkv
+    - Directory path like: /path/to/2026/2/1 16:01:33.mp4
     
     Args:
-        filename: Video filename (with or without extension)
+        filename: Video filename (with or without extension), can be full path
     
     Returns:
         datetime object or None if parsing fails
@@ -22,31 +25,41 @@ def parse_video_filename(filename: str) -> datetime | None:
     # Remove extension
     stem = Path(filename).stem
     
+    # Also try full path string for dashcam style with directories
+    full_str = str(filename)
+    
     # Try different patterns
     patterns = [
-        # yyyy-mm-dd hh-mm-ss or yyyy.mm.dd hh.mm.ss
+        # yyyy-mm-dd hh-mm-ss or yyyy.mm.dd hh.mm.ss (OBS style, 2-digit required)
         r'(\d{4})[-.](\d{2})[-.](\d{2})[\s_](\d{2})[-.](\d{2})[-.](\d{2})',
         # yyyy-mm-dd hh-mm (no seconds)
         r'(\d{4})[-.](\d{2})[-.](\d{2})[\s_](\d{2})[-.](\d{2})',
+        # yyyy/m/d h:m:s or yyyy/mm/dd hh:mm:ss (dashcam style, flexible digits)
+        # This can match both standalone filename and path with date directories
+        r'(\d{4})/(\d{1,2})/(\d{1,2})\s+(\d{1,2}):(\d{2}):(\d{2})',
+        # yyyy/m/d h:m (no seconds, dashcam style)
+        r'(\d{4})/(\d{1,2})/(\d{1,2})\s+(\d{1,2}):(\d{2})',
     ]
     
-    for pattern in patterns:
-        match = re.search(pattern, stem)
-        if match:
-            groups = match.groups()
-            try:
-                if len(groups) == 6:
-                    return datetime(
-                        int(groups[0]), int(groups[1]), int(groups[2]),
-                        int(groups[3]), int(groups[4]), int(groups[5])
-                    )
-                elif len(groups) == 5:
-                    return datetime(
-                        int(groups[0]), int(groups[1]), int(groups[2]),
-                        int(groups[3]), int(groups[4]), 0
-                    )
-            except ValueError:
-                continue
+    # Try full path first (for dashcam style with directories), then stem
+    for search_str in [full_str, stem]:
+        for pattern in patterns:
+            match = re.search(pattern, search_str)
+            if match:
+                groups = match.groups()
+                try:
+                    if len(groups) == 6:
+                        return datetime(
+                            int(groups[0]), int(groups[1]), int(groups[2]),
+                            int(groups[3]), int(groups[4]), int(groups[5])
+                        )
+                    elif len(groups) == 5:
+                        return datetime(
+                            int(groups[0]), int(groups[1]), int(groups[2]),
+                            int(groups[3]), int(groups[4]), 0
+                        )
+                except ValueError:
+                    continue
     
     return None
 
