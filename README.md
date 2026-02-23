@@ -204,6 +204,12 @@ python download_ffmpeg.py --check-ffmpeg
 
 ## 更新日志
 
+### v1.0.7
+- 📝 增强 FFmpeg 执行过程日志
+- 🔍 每隔100行输出进度状态
+- 🔍 每10%进度记录一次
+- 🔍 检测进程是否提前结束
+
 ### v1.0.6
 - 🐛 **修复关键 bug**: `WorkerThread` 缺少 `current_task` 属性导致程序崩溃
 - 这是导致"只完成一个任务就退出"的真正原因！

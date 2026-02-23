@@ -306,6 +306,9 @@ class VideoProcessor:
             
             # Parse progress from ffmpeg output
             line_count = 0
+            last_progress_log = 0
+            
+            logger.debug("Entering readline loop...")
             while True:
                 if self._stopped:
                     logger.warning("Task stopped during processing")
@@ -318,6 +321,12 @@ class VideoProcessor:
                     import time
                     time.sleep(0.1)
                 
+                # Check if process is still running
+                poll_result = self._process.poll()
+                if poll_result is not None:
+                    logger.info(f"Process ended during readline loop, return code: {poll_result}")
+                    break
+                
                 try:
                     line = self._process.stdout.readline()
                 except Exception as read_err:
@@ -329,9 +338,11 @@ class VideoProcessor:
                     logger.debug(f"readline() returned empty after {line_count} lines")
                     break
                 
-                # Log first few lines for debugging
+                # Log first few lines and every 100 lines
                 if line_count <= 5:
                     logger.debug(f"FFmpeg output line {line_count}: {line.strip()}")
+                elif line_count % 100 == 0:
+                    logger.debug(f"FFmpeg output line {line_count} (progress continues...)")
                 
                 # Parse progress
                 if line.startswith('out_time_ms'):
@@ -341,11 +352,23 @@ class VideoProcessor:
                         task.progress = progress
                         if progress_callback:
                             progress_callback(progress)
+                        
+                        # Log progress every 10%
+                        progress_pct = int(progress * 100)
+                        if progress_pct >= last_progress_log + 10:
+                            logger.debug(f"Progress: {progress_pct}%")
+                            last_progress_log = progress_pct
                     except (ValueError, ZeroDivisionError):
                         pass
             
-            logger.info(f"readline loop ended, total lines: {line_count}, polling process...")
-            return_code = self._process.wait()
+            logger.info(f"readline loop ended, total lines: {line_count}")
+            
+            # Wait for process to finish if not already
+            return_code = self._process.poll()
+            if return_code is None:
+                logger.debug("Waiting for process to finish...")
+                return_code = self._process.wait()
+            
             logger.info(f"FFmpeg process finished with return code: {return_code}")
             
             # Read any remaining stderr
