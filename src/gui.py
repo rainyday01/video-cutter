@@ -1,5 +1,6 @@
 """Main GUI for Video Cutter application."""
 import sys
+import logging
 import threading
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -17,6 +18,7 @@ from .excel_parser import parse_excel_clips, ClipDefinition
 from .video_processor import VideoProcessor, VideoInfo, ClipTask, QualitySettings, OffsetSettings
 from .utils import parse_video_filename, get_video_files
 from .ffmpeg_manager import check_ffmpeg, check_ffprobe, get_ffmpeg_path, get_ffprobe_path
+from .logger import get_logger, log_exception
 
 
 class WorkerThread(QThread):
@@ -46,10 +48,18 @@ class WorkerThread(QThread):
     
     def run(self):
         """Process all tasks."""
+        from .logger import get_logger
+        logger = get_logger()
+        logger.info(f"WorkerThread started with {len(self.tasks)} tasks")
+        logger.info(f"Available videos: {len(self.video_infos)}")
+        
         try:
             # Assign video info to each task
-            for task in self.tasks:
+            for i, task in enumerate(self.tasks):
+                logger.info(f"Processing task {i+1}/{len(self.tasks)}: {task.description}")
+                
                 if not self._running:
+                    logger.info("Worker stopped, exiting loop")
                     break
                 
                 # Resume from paused state
@@ -58,6 +68,7 @@ class WorkerThread(QThread):
                     time.sleep(0.1)
                 
                 if not self._running:
+                    logger.info("Worker stopped during pause, exiting")
                     break
                 
                 try:
@@ -65,6 +76,9 @@ class WorkerThread(QThread):
                     adjusted_start, adjusted_end = self.processor.apply_time_offset(
                         task.clip_start, task.clip_end, self.offset
                     )
+                    
+                    logger.debug(f"Original times: {task.clip_start} ~ {task.clip_end}")
+                    logger.debug(f"Adjusted times: {adjusted_start} ~ {adjusted_end}")
                     
                     # Update task with adjusted times
                     original_duration = (task.clip_end - task.clip_start).total_seconds()
@@ -76,21 +90,25 @@ class WorkerThread(QThread):
                     task.clip_end = adjusted_end
                     
                     # Find source video for this task
+                    logger.debug(f"Finding video for clip {task.clip_start} ~ {task.clip_end}")
                     task.video_info = self.processor.find_video_for_clip(
                         self.video_infos, task.clip_start, task.clip_end
                     )
                     
                     if task.video_info:
+                        logger.info(f"Found video: {task.video_info.path.name}")
                         self.log_message.emit(f"处理: {task.description} (源: {task.video_info.path.name})")
-                        self.processor.cut_clip(
+                        
+                        success = self.processor.cut_clip(
                             task, self.quality,
                             progress_callback=lambda p: self.progress_updated.emit(p),
                             log_callback=lambda msg: self.log_message.emit(msg)
                         )
                         
-                        success = task.status == "completed"
-                        self.task_completed.emit(task.description, success)
+                        logger.info(f"cut_clip returned: {success}, task.status: {task.status}")
+                        self.task_completed.emit(task.description, task.status == "completed")
                     else:
+                        logger.warning(f"No video found for task: {task.description}")
                         task.status = "failed"
                         task.error = "找不到源视频"
                         self.log_message.emit(f"失败: {task.description} - 找不到匹配的源视频")
@@ -99,17 +117,22 @@ class WorkerThread(QThread):
                         
                 except Exception as e:
                     import traceback
+                    logger.error(f"Task exception: {str(e)}")
+                    logger.debug(traceback.format_exc())
                     task.status = "failed"
                     task.error = str(e)
                     self.log_message.emit(f"异常: {task.description} - {str(e)}")
                     self.log_message.emit(traceback.format_exc())
                     self.task_completed.emit(task.description, False)
             
+            logger.info(f"Worker loop completed, running={self._running}")
             if self._running:
                 self.all_completed.emit()
                 
         except Exception as e:
             import traceback
+            logger.error(f"Worker critical error: {str(e)}")
+            logger.debug(traceback.format_exc())
             self.log_message.emit(f"严重错误: {str(e)}")
             self.log_message.emit(traceback.format_exc())
             self.all_completed.emit()
@@ -135,6 +158,10 @@ class VideoCutterWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("视频剪辑工具")
         self.resize(900, 700)
+        
+        # Initialize logger first
+        self.logger = get_logger()
+        self.logger.info("Application starting...")
         
         # Data
         self.video_folder: Path | None = None
@@ -398,11 +425,14 @@ class VideoCutterWindow(QMainWindow):
         """Setup status bar."""
         self.statusBar().showMessage("就绪")
     
-    def log(self, message: str):
+    def log(self, message: str, level: str = 'INFO'):
         """Add message to log."""
         timestamp = datetime.now().strftime("%H:%M:%S")
         self.log_text.append(f"[{timestamp}] {message}")
         self.statusBar().showMessage(message)
+        
+        # Also write to file
+        self.logger.log(getattr(logging, level, logging.INFO), message)
     
     def select_video_folder(self):
         """Select source video folder."""
@@ -565,6 +595,15 @@ class VideoCutterWindow(QMainWindow):
         self.completed_clips = 0
         self.failed_clips = 0
         self.start_time = datetime.now()
+        
+        # Reset processor state (important for restart after stop)
+        self.processor.reset()
+        
+        # Log start
+        self.log(f"共 {self.total_clips} 个任务待处理")
+        self.logger.info(f"Video infos count: {len(self.video_infos)}")
+        for vi in self.video_infos:
+            self.logger.info(f"  Video: {vi.path.name}, start={vi.start_time}, duration={vi.duration}s")
         
         # Update task table
         for row in range(self.task_table.rowCount()):

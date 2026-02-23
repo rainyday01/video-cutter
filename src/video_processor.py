@@ -240,16 +240,25 @@ class VideoProcessor:
         Returns:
             True if successful, False otherwise
         """
+        from .logger import get_logger
+        logger = get_logger()
+        
         if not task.video_info:
             task.status = "failed"
             task.error = "No source video found"
+            logger.error(f"No video_info for task: {task.description}")
             return False
         
         video = task.video_info
+        logger.info(f"cut_clip: {task.description}")
+        logger.info(f"  Source: {video.path}")
+        logger.info(f"  Clip times: {task.clip_start} ~ {task.clip_end}")
         
         # Calculate seek time and duration
         seek_time = self.calculate_seek_time(video, task.clip_start)
         duration = (task.clip_end - task.clip_start).total_seconds()
+        
+        logger.info(f"  Seek time: {seek_time:.2f}s, Duration: {duration:.2f}s")
         
         # Calculate output bitrate
         output_bitrate = int(video.bitrate * quality.bitrate_ratio)
@@ -275,6 +284,8 @@ class VideoProcessor:
             str(task.output_path)
         ]
         
+        logger.debug(f"FFmpeg command: {' '.join(cmd)}")
+        
         if log_callback:
             log_callback(f"开始生成: {task.description}.mp4")
         
@@ -289,12 +300,14 @@ class VideoProcessor:
         
         try:
             self._process = subprocess.Popen(cmd, **popen_kwargs)
+            logger.info(f"FFmpeg process started (PID: {self._process.pid})")
             
             task.status = "processing"
             
             # Parse progress from ffmpeg output
             while True:
                 if self._stopped:
+                    logger.warning("Task stopped during processing")
                     self._process.kill()
                     task.status = "failed"
                     task.error = "Task stopped"
@@ -319,25 +332,30 @@ class VideoProcessor:
                     except (ValueError, ZeroDivisionError):
                         pass
             
-            self._process.wait()
+            return_code = self._process.wait()
+            logger.info(f"FFmpeg process finished with return code: {return_code}")
             
-            if self._process.returncode == 0:
+            if return_code == 0:
                 task.status = "completed"
                 task.progress = 1.0
                 if progress_callback:
                     progress_callback(1.0)
+                logger.info(f"Successfully created: {task.output_path.name}")
                 return True
             else:
                 task.status = "failed"
                 stderr = self._process.stderr.read() if self._process.stderr else ""
                 task.error = stderr[:500] if stderr else "Unknown error"
+                logger.error(f"FFmpeg failed: {task.error}")
                 return False
                 
         except Exception as e:
+            logger.exception(f"Exception during cut_clip: {str(e)}")
             task.status = "failed"
             task.error = str(e)
             return False
         finally:
+            logger.debug("cut_clip finally block executed")
             self._process = None
     
     def pause(self):
@@ -357,4 +375,6 @@ class VideoProcessor:
     def reset(self):
         """Reset processor state."""
         self._paused = False
+        self._stopped = False  # Important: reset stopped flag
+        self._process = None
         self._stopped = False
