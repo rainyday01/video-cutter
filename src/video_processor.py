@@ -305,6 +305,7 @@ class VideoProcessor:
             task.status = "processing"
             
             # Parse progress from ffmpeg output
+            line_count = 0
             while True:
                 if self._stopped:
                     logger.warning("Task stopped during processing")
@@ -317,9 +318,20 @@ class VideoProcessor:
                     import time
                     time.sleep(0.1)
                 
-                line = self._process.stdout.readline()
-                if not line:
+                try:
+                    line = self._process.stdout.readline()
+                except Exception as read_err:
+                    logger.error(f"readline() error: {read_err}")
                     break
+                
+                line_count += 1
+                if not line:
+                    logger.debug(f"readline() returned empty after {line_count} lines")
+                    break
+                
+                # Log first few lines for debugging
+                if line_count <= 5:
+                    logger.debug(f"FFmpeg output line {line_count}: {line.strip()}")
                 
                 # Parse progress
                 if line.startswith('out_time_ms'):
@@ -332,8 +344,15 @@ class VideoProcessor:
                     except (ValueError, ZeroDivisionError):
                         pass
             
+            logger.info(f"readline loop ended, total lines: {line_count}, polling process...")
             return_code = self._process.wait()
             logger.info(f"FFmpeg process finished with return code: {return_code}")
+            
+            # Read any remaining stderr
+            if self._process.stderr:
+                stderr_output = self._process.stderr.read()
+                if stderr_output:
+                    logger.debug(f"FFmpeg stderr: {stderr_output[:1000]}")
             
             if return_code == 0:
                 task.status = "completed"

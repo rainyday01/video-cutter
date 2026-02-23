@@ -2,10 +2,11 @@
 import sys
 import logging
 import threading
+import traceback
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer, qInstallMessageHandler
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QGroupBox, QLabel, QLineEdit, QPushButton, QComboBox, QProgressBar,
@@ -19,6 +20,46 @@ from .video_processor import VideoProcessor, VideoInfo, ClipTask, QualitySetting
 from .utils import parse_video_filename, get_video_files
 from .ffmpeg_manager import check_ffmpeg, check_ffprobe, get_ffmpeg_path, get_ffprobe_path
 from .logger import get_logger, log_exception
+
+
+# Install Qt message handler to capture Qt logs
+def qt_message_handler(mode, context, message):
+    logger = get_logger()
+    if mode == 0:  # QtDebugMsg
+        logger.debug(f"[Qt] {message}")
+    elif mode == 1:  # QtWarningMsg
+        logger.warning(f"[Qt] {message}")
+    elif mode == 2:  # QtCriticalMsg
+        logger.error(f"[Qt] {message}")
+    elif mode == 3:  # QtFatalMsg
+        logger.error(f"[Qt FATAL] {message}")
+    elif mode == 4:  # QtInfoMsg
+        logger.info(f"[Qt] {message}")
+
+
+qInstallMessageHandler(qt_message_handler)
+
+
+# Global exception hook
+def global_exception_hook(exc_type, exc_value, exc_tb):
+    logger = get_logger()
+    logger.error(f"Uncaught exception: {exc_type.__name__}: {exc_value}")
+    logger.debug(''.join(traceback.format_exception(exc_type, exc_value, exc_tb)))
+    # Call the original excepthook
+    sys.__excepthook__(exc_type, exc_value, exc_tb)
+
+
+sys.excepthook = global_exception_hook
+
+
+# Thread exception hook
+def thread_exception_hook(args):
+    logger = get_logger()
+    logger.error(f"Thread exception: {args.exc_type.__name__}: {args.exc_value}")
+    logger.debug(''.join(traceback.format_exception(args.exc_type, args.exc_value, args.exc_tb)))
+
+
+threading.excepthook = thread_exception_hook
 
 
 class WorkerThread(QThread):
@@ -136,6 +177,8 @@ class WorkerThread(QThread):
             self.log_message.emit(f"严重错误: {str(e)}")
             self.log_message.emit(traceback.format_exc())
             self.all_completed.emit()
+        finally:
+            logger.info("WorkerThread run() finished - finally block")
     
     def pause(self):
         """Pause processing."""
