@@ -304,22 +304,55 @@ class VideoProcessor:
             
             task.status = "processing"
             
-            # Use threads to read stdout and stderr with timeout capability
+            # Strategy: Read stdout in a thread, update progress via shared variable
+            # Main thread waits for process to complete
             import threading
-            import queue
+            import time
             
-            stdout_queue = queue.Queue()
-            stderr_output = []
+            last_progress = [0.0]  # Use list for mutable reference
+            last_progress_log = [0]
+            line_count = [0]
+            stdout_done = threading.Event()
             
-            def read_stdout():
+            def read_progress():
+                """Read progress from stdout (runs in thread)."""
                 try:
                     for line in self._process.stdout:
-                        stdout_queue.put(line)
-                except:
-                    pass
+                        line_count[0] += 1
+                        
+                        # Log first few lines
+                        if line_count[0] <= 10:
+                            logger.debug(f"FFmpeg output line {line_count[0]}: {line.strip()}")
+                        
+                        # Parse progress
+                        if line.startswith('out_time_ms'):
+                            try:
+                                out_time_us = int(line.split('=')[1])
+                                progress = min(1.0, out_time_us / 1000000 / duration)
+                                last_progress[0] = progress
+                                task.progress = progress
+                                if progress_callback:
+                                    progress_callback(progress)
+                                
+                                # Log progress every 10%
+                                progress_pct = int(progress * 100)
+                                if progress_pct >= last_progress_log[0] + 10:
+                                    logger.debug(f"Progress: {progress_pct}%")
+                                    last_progress_log[0] = progress_pct
+                            except (ValueError, ZeroDivisionError):
+                                pass
+                except Exception as e:
+                    logger.debug(f"read_progress error: {e}")
                 finally:
-                    stdout_queue.put(None)  # Signal end
+                    stdout_done.set()
+                    logger.info(f"Progress thread done, total lines: {line_count[0]}")
             
+            # Start progress reader thread
+            progress_thread = threading.Thread(target=read_progress, daemon=True)
+            progress_thread.start()
+            
+            # Read stderr in background
+            stderr_output = []
             def read_stderr():
                 try:
                     for line in self._process.stderr:
@@ -327,18 +360,11 @@ class VideoProcessor:
                 except:
                     pass
             
-            stdout_thread = threading.Thread(target=read_stdout, daemon=True)
             stderr_thread = threading.Thread(target=read_stderr, daemon=True)
-            stdout_thread.start()
             stderr_thread.start()
             
-            # Read stdout for progress with timeout
-            line_count = 0
-            last_progress_log = 0
-            last_activity_time = __import__('time').time()
-            timeout_seconds = 30  # If no activity for 30 seconds, check process
-            
-            logger.debug("Entering readline loop...")
+            # Main thread: wait for process to complete
+            logger.debug("Waiting for FFmpeg process to complete...")
             
             while True:
                 if self._stopped:
@@ -349,81 +375,20 @@ class VideoProcessor:
                     return False
                 
                 while self._paused:
-                    import time
                     time.sleep(0.1)
                 
-                # Check if process has ended
-                poll_result = self._process.poll()
-                if poll_result is not None:
-                    logger.info(f"Process ended, return code: {poll_result}")
-                    # Drain remaining stdout
-                    while True:
-                        try:
-                            line = stdout_queue.get(timeout=0.1)
-                            if line is None:
-                                break
-                            line_count += 1
-                        except:
-                            break
-                    break
-                
-                # Try to get a line with timeout
+                # Wait for process with 0.5s timeout so we can check _stopped
                 try:
-                    line = stdout_queue.get(timeout=0.5)
-                except:
-                    # Timeout - check if process is still alive
-                    current_time = __import__('time').time()
-                    if current_time - last_activity_time > timeout_seconds:
-                        logger.warning(f"No stdout activity for {timeout_seconds}s, checking process...")
-                        poll_result = self._process.poll()
-                        if poll_result is not None:
-                            logger.info(f"Process completed (return code: {poll_result})")
-                            break
-                        # Process still running, reset timer and wait more
-                        last_activity_time = current_time
-                        logger.debug("Process still running, continuing to wait...")
+                    return_code = self._process.wait(timeout=0.5)
+                    break  # Process finished
+                except subprocess.TimeoutExpired:
+                    # Process still running, continue waiting
                     continue
-                
-                if line is None:
-                    # End of stream
-                    logger.info("stdout stream ended")
-                    break
-                
-                last_activity_time = __import__('time').time()
-                line_count += 1
-                
-                # Log first few lines and every 100 lines
-                if line_count <= 10:
-                    logger.debug(f"FFmpeg output line {line_count}: {line.strip()}")
-                elif line_count % 100 == 0:
-                    logger.debug(f"FFmpeg output line {line_count} (progress continues...)")
-                
-                # Parse progress
-                if line.startswith('out_time_ms'):
-                    try:
-                        out_time_us = int(line.split('=')[1])
-                        progress = min(1.0, out_time_us / 1000000 / duration)
-                        task.progress = progress
-                        if progress_callback:
-                            progress_callback(progress)
-                        
-                        # Log progress every 10%
-                        progress_pct = int(progress * 100)
-                        if progress_pct >= last_progress_log + 10:
-                            logger.debug(f"Progress: {progress_pct}%")
-                            last_progress_log = progress_pct
-                    except (ValueError, ZeroDivisionError):
-                        pass
-            
-            logger.info(f"readline loop ended, total lines: {line_count}")
-            
-            # Wait for process to finish if not already
-            return_code = self._process.poll()
-            if return_code is None:
-                logger.debug("Waiting for process to finish...")
-                return_code = self._process.wait()
             
             logger.info(f"FFmpeg process finished with return code: {return_code}")
+            
+            # Wait for progress thread to finish (with timeout)
+            progress_thread.join(timeout=2.0)
             
             # Get stderr output
             stderr_thread.join(timeout=1.0)
