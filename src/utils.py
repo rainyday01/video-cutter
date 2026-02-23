@@ -14,6 +14,7 @@ def parse_video_filename(filename: str) -> datetime | None:
     - 2026-01-15_10-45-00.MOV
     - 2026/2/1 16:01:33.mp4 (dashcam style, flexible month/day)
     - 2026/02/01 16:01:33.mkv
+    - abcxyz_20260201_090101.mp4 (compact format with prefix)
     - Directory path like: /path/to/2026/2/1 16:01:33.mp4
     
     Args:
@@ -30,6 +31,10 @@ def parse_video_filename(filename: str) -> datetime | None:
     
     # Try different patterns
     patterns = [
+        # yyyymmdd_hhmmss (compact format, may have prefix/suffix)
+        r'(\d{4})(\d{2})(\d{2})_(\d{2})(\d{2})(\d{2})',
+        # yyyymmdd_hhmm (compact format, no seconds)
+        r'(\d{4})(\d{2})(\d{2})_(\d{2})(\d{2})',
         # yyyy-mm-dd hh-mm-ss or yyyy.mm.dd hh.mm.ss (OBS style, 2-digit required)
         r'(\d{4})[-.](\d{2})[-.](\d{2})[\s_](\d{2})[-.](\d{2})[-.](\d{2})',
         # yyyy-mm-dd hh-mm (no seconds)

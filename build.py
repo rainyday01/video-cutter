@@ -133,6 +133,11 @@ def build_pyinstaller(one_file: bool = True, windowed: bool = True):
     if icon_path.exists():
         cmd.extend(["--icon", str(icon_path)])
     
+    # Add assets folder for runtime icon access
+    assets_dir = root / "assets"
+    if assets_dir.exists():
+        cmd.extend(["--add-data", f"{assets_dir}:assets"])
+    
     # Entry point
     cmd.append("main.py")
     

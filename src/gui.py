@@ -206,6 +206,9 @@ class VideoCutterWindow(QMainWindow):
         self.setWindowTitle("视频剪辑工具")
         self.resize(900, 700)
         
+        # Set window icon
+        self._set_window_icon()
+        
         # Initialize logger first
         self.logger = get_logger()
         self.logger.info("Application starting...")
@@ -227,6 +230,25 @@ class VideoCutterWindow(QMainWindow):
         self.failed_clips = 0
         
         self.setup_ui()
+    
+    def _set_window_icon(self):
+        """Set the application window icon."""
+        from pathlib import Path
+        
+        # Try to find icon in various locations
+        possible_paths = [
+            # When running from source
+            Path(__file__).parent.parent / 'assets' / 'icon.png',
+            Path(__file__).parent.parent / 'assets' / 'icon.ico',
+            # When running from PyInstaller bundle
+            Path(sys.executable).parent / 'assets' / 'icon.png',
+            Path(sys.executable).parent / 'assets' / 'icon.ico',
+        ]
+        
+        for icon_path in possible_paths:
+            if icon_path.exists():
+                self.setWindowIcon(QIcon(str(icon_path)))
+                break
         self.setup_menu()
         self.setup_statusbar()
         self.check_ffmpeg_availability()
@@ -853,6 +875,19 @@ def main():
     """Application entry point."""
     app = QApplication(sys.argv)
     app.setStyle("Fusion")  # Use Fusion style for better look
+    
+    # Set application icon
+    from pathlib import Path
+    possible_icon_paths = [
+        Path(__file__).parent.parent / 'assets' / 'icon.png',
+        Path(__file__).parent.parent / 'assets' / 'icon.ico',
+        Path(sys.executable).parent / 'assets' / 'icon.png',
+        Path(sys.executable).parent / 'assets' / 'icon.ico',
+    ]
+    for icon_path in possible_icon_paths:
+        if icon_path.exists():
+            app.setWindowIcon(QIcon(str(icon_path)))
+            break
     
     window = VideoCutterWindow()
     window.show()
