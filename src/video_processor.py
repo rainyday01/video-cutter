@@ -1,13 +1,14 @@
 """Video processing using ffmpeg."""
 import json
 import subprocess
+import platform
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Callable
 
 from .utils import parse_video_filename
-from .ffmpeg_manager import get_ffmpeg_path, get_ffprobe_path
+from .ffmpeg_manager import get_ffmpeg_path, get_ffprobe_path, get_subprocess_args
 
 
 @dataclass
@@ -54,6 +55,18 @@ class QualitySettings:
         return cls("低", 0.3)
 
 
+@dataclass
+class OffsetSettings:
+    """Global time offset settings for clips."""
+    start_offset: float = 0.0  # seconds (positive = earlier, negative = later)
+    end_offset: float = 0.0    # seconds (positive = later, negative = earlier)
+    min_duration: float = 10.0  # minimum clip duration in seconds
+    
+    @classmethod
+    def default(cls) -> 'OffsetSettings':
+        return cls(start_offset=0.0, end_offset=0.0, min_duration=10.0)
+
+
 def get_video_info(video_path: Path) -> VideoInfo | None:
     """
     Get video information using ffprobe.
@@ -75,7 +88,7 @@ def get_video_info(video_path: Path) -> VideoInfo | None:
             str(video_path)
         ]
         
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        result = subprocess.run(cmd, **get_subprocess_args(timeout=30))
         
         if result.returncode != 0:
             return None
@@ -133,6 +146,35 @@ class VideoProcessor:
         self._paused: bool = False
         self._stopped: bool = False
         self.current_task: ClipTask | None = None
+    
+    def apply_time_offset(
+        self,
+        clip_start: datetime,
+        clip_end: datetime,
+        offset: OffsetSettings
+    ) -> tuple[datetime, datetime]:
+        """
+        Apply global time offset to clip times.
+        
+        Args:
+            clip_start: Original clip start time
+            clip_end: Original clip end time
+            offset: Offset settings
+        
+        Returns:
+            Tuple of (adjusted_start, adjusted_end)
+        """
+        # Apply offsets (positive start_offset = earlier, positive end_offset = later)
+        adjusted_start = clip_start - timedelta(seconds=offset.start_offset)
+        adjusted_end = clip_end + timedelta(seconds=offset.end_offset)
+        
+        # Ensure minimum duration
+        duration = (adjusted_end - adjusted_start).total_seconds()
+        if duration < offset.min_duration:
+            # Extend from start to meet minimum duration
+            adjusted_end = adjusted_start + timedelta(seconds=offset.min_duration)
+        
+        return adjusted_start, adjusted_end
     
     def find_video_for_clip(
         self,
@@ -222,13 +264,17 @@ class VideoProcessor:
         if log_callback:
             log_callback(f"开始生成: {task.description}.mp4")
         
+        # Prepare subprocess arguments - hide console on Windows
+        popen_kwargs = {
+            'stdout': subprocess.PIPE,
+            'stderr': subprocess.PIPE,
+            'text': True
+        }
+        if platform.system() == 'Windows':
+            popen_kwargs['creationflags'] = subprocess.CREATE_NO_WINDOW
+        
         try:
-            self._process = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True
-            )
+            self._process = subprocess.Popen(cmd, **popen_kwargs)
             
             task.status = "processing"
             

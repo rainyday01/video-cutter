@@ -9,12 +9,12 @@ from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QGroupBox, QLabel, QLineEdit, QPushButton, QComboBox, QProgressBar,
     QTextEdit, QFileDialog, QMessageBox, QTableWidget, QTableWidgetItem,
-    QHeaderView, QStatusBar, QToolBar
+    QHeaderView, QStatusBar, QToolBar, QSpinBox, QDoubleSpinBox
 )
 from PyQt6.QtGui import QAction, QIcon
 
 from .excel_parser import parse_excel_clips, ClipDefinition
-from .video_processor import VideoProcessor, VideoInfo, ClipTask, QualitySettings
+from .video_processor import VideoProcessor, VideoInfo, ClipTask, QualitySettings, OffsetSettings
 from .utils import parse_video_filename, get_video_files
 from .ffmpeg_manager import check_ffmpeg, check_ffprobe, get_ffmpeg_path, get_ffprobe_path
 
@@ -32,13 +32,15 @@ class WorkerThread(QThread):
         processor: VideoProcessor,
         tasks: list[ClipTask],
         quality: QualitySettings,
-        video_infos: list[VideoInfo]
+        video_infos: list[VideoInfo],
+        offset: OffsetSettings | None = None
     ):
         super().__init__()
         self.processor = processor
         self.tasks = tasks
         self.quality = quality
         self.video_infos = video_infos
+        self.offset = offset or OffsetSettings.default()
         self._running = True
         self._paused = False
     
@@ -56,6 +58,20 @@ class WorkerThread(QThread):
             
             if not self._running:
                 break
+            
+            # Apply offset to clip times
+            adjusted_start, adjusted_end = self.processor.apply_time_offset(
+                task.clip_start, task.clip_end, self.offset
+            )
+            
+            # Update task with adjusted times
+            original_duration = (task.clip_end - task.clip_start).total_seconds()
+            new_duration = (adjusted_end - adjusted_start).total_seconds()
+            if new_duration != original_duration:
+                self.log_message.emit(f"时间偏移: {task.description} ({original_duration:.1f}s → {new_duration:.1f}s)")
+            
+            task.clip_start = adjusted_start
+            task.clip_end = adjusted_end
             
             # Find source video for this task
             task.video_info = self.processor.find_video_for_clip(
@@ -216,6 +232,52 @@ class VideoCutterWindow(QMainWindow):
         quality_layout.addWidget(self.quality_combo)
         quality_layout.addStretch()
         output_layout.addLayout(quality_layout)
+        
+        # === Time Offset Settings ===
+        offset_group = QGroupBox("时间偏移设置")
+        offset_layout = QVBoxLayout()
+        
+        # Start offset
+        start_offset_layout = QHBoxLayout()
+        start_offset_layout.addWidget(QLabel("起始时间偏移:"))
+        self.start_offset_spin = QSpinBox()
+        self.start_offset_spin.setRange(-60, 60)
+        self.start_offset_spin.setValue(0)
+        self.start_offset_spin.setSuffix(" 秒")
+        self.start_offset_spin.setToolTip("正数=提前开始，负数=延后开始")
+        start_offset_layout.addWidget(self.start_offset_spin)
+        start_offset_layout.addWidget(QLabel("(正数提前，负数延后)"))
+        start_offset_layout.addStretch()
+        offset_layout.addLayout(start_offset_layout)
+        
+        # End offset
+        end_offset_layout = QHBoxLayout()
+        end_offset_layout.addWidget(QLabel("结束时间偏移:"))
+        self.end_offset_spin = QSpinBox()
+        self.end_offset_spin.setRange(-60, 60)
+        self.end_offset_spin.setValue(0)
+        self.end_offset_spin.setSuffix(" 秒")
+        self.end_offset_spin.setToolTip("正数=延后结束，负数=提前结束")
+        end_offset_layout.addWidget(self.end_offset_spin)
+        end_offset_layout.addWidget(QLabel("(正数延后，负数提前)"))
+        end_offset_layout.addStretch()
+        offset_layout.addLayout(end_offset_layout)
+        
+        # Minimum duration
+        min_duration_layout = QHBoxLayout()
+        min_duration_layout.addWidget(QLabel("最小时长:"))
+        self.min_duration_spin = QSpinBox()
+        self.min_duration_spin.setRange(1, 300)
+        self.min_duration_spin.setValue(10)
+        self.min_duration_spin.setSuffix(" 秒")
+        self.min_duration_spin.setToolTip("偏移后如果时长小于此值，自动延长到此时长")
+        min_duration_layout.addWidget(self.min_duration_spin)
+        min_duration_layout.addWidget(QLabel("(确保片段最短时长)"))
+        min_duration_layout.addStretch()
+        offset_layout.addLayout(min_duration_layout)
+        
+        offset_group.setLayout(offset_layout)
+        output_layout.addWidget(offset_group)
         
         output_group.setLayout(output_layout)
         main_layout.addWidget(output_group)
@@ -466,6 +528,13 @@ class VideoCutterWindow(QMainWindow):
         # Get quality setting
         quality = self.quality_combo.currentData()
         
+        # Get offset settings
+        offset = OffsetSettings(
+            start_offset=self.start_offset_spin.value(),
+            end_offset=self.end_offset_spin.value(),
+            min_duration=self.min_duration_spin.value()
+        )
+        
         # Reset counters
         self.total_clips = len(self.clip_tasks)
         self.completed_clips = 0
@@ -489,7 +558,7 @@ class VideoCutterWindow(QMainWindow):
         
         # Start worker thread
         self.worker = WorkerThread(
-            self.processor, self.clip_tasks, quality, self.video_infos
+            self.processor, self.clip_tasks, quality, self.video_infos, offset
         )
         self.worker.progress_updated.connect(self.on_progress_updated)
         self.worker.log_message.connect(self.on_log_message)

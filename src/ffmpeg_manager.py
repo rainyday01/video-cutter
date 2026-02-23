@@ -7,6 +7,40 @@ import subprocess
 from pathlib import Path
 
 
+def get_subprocess_args(**kwargs) -> dict:
+    """
+    Get subprocess arguments with Windows console window hidden.
+    
+    On Windows, this prevents command prompt windows from appearing
+    when running ffmpeg/ffprobe commands.
+    
+    Args:
+        **kwargs: Additional subprocess arguments
+    
+    Returns:
+        Dict of subprocess arguments
+    """
+    args = {
+        'capture_output': kwargs.get('capture_output', True),
+        'text': kwargs.get('text', True),
+        'timeout': kwargs.get('timeout', 30),
+    }
+    
+    # On Windows, hide the console window
+    if platform.system() == 'Windows':
+        args['creationflags'] = subprocess.CREATE_NO_WINDOW
+    else:
+        # On Unix, we can use start_new_session to detach from terminal
+        args['start_new_session'] = True
+    
+    # Merge with any additional kwargs
+    for key, value in kwargs.items():
+        if key not in ['capture_output', 'text', 'timeout']:
+            args[key] = value
+    
+    return args
+
+
 def get_bundled_ffmpeg_dir() -> Path | None:
     """Get the directory containing bundled ffmpeg binaries."""
     system = platform.system()
@@ -107,9 +141,7 @@ def check_ffmpeg() -> tuple[bool, str]:
     try:
         result = subprocess.run(
             [ffmpeg_path, "-version"],
-            capture_output=True,
-            text=True,
-            timeout=10
+            **get_subprocess_args(timeout=10)
         )
         
         if result.returncode == 0:
@@ -117,7 +149,7 @@ def check_ffmpeg() -> tuple[bool, str]:
             first_line = result.stdout.split('\n')[0]
             return True, first_line
         else:
-            return False, f"ffmpeg 执行失败: {result.stderr[:100]}"
+            return False, f"ffmpeg 执行失败: {result.stderr[:100] if result.stderr else 'Unknown error'}"
             
     except FileNotFoundError:
         return False, "未找到 ffmpeg，请安装 ffmpeg 或使用包含 ffmpeg 的打包版本"
@@ -139,16 +171,14 @@ def check_ffprobe() -> tuple[bool, str]:
     try:
         result = subprocess.run(
             [ffprobe_path, "-version"],
-            capture_output=True,
-            text=True,
-            timeout=10
+            **get_subprocess_args(timeout=10)
         )
         
         if result.returncode == 0:
             first_line = result.stdout.split('\n')[0]
             return True, first_line
         else:
-            return False, f"ffprobe 执行失败: {result.stderr[:100]}"
+            return False, f"ffprobe 执行失败: {result.stderr[:100] if result.stderr else 'Unknown error'}"
             
     except FileNotFoundError:
         return False, "未找到 ffprobe"
