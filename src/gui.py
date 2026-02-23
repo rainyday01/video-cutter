@@ -234,16 +234,24 @@ class VideoCutterWindow(QMainWindow):
     def _set_window_icon(self):
         """Set the application window icon."""
         from pathlib import Path
+        import platform
+        
+        # Choose icon format based on platform
+        system = platform.system()
+        if system == "Darwin":
+            icon_names = ["icon.icns", "icon.png", "icon.ico"]
+        elif system == "Windows":
+            icon_names = ["icon.ico", "icon.png"]
+        else:
+            icon_names = ["icon.png", "icon.icns", "icon.ico"]
         
         # Try to find icon in various locations
-        possible_paths = [
+        possible_paths = []
+        for icon_name in icon_names:
             # When running from source
-            Path(__file__).parent.parent / 'assets' / 'icon.png',
-            Path(__file__).parent.parent / 'assets' / 'icon.ico',
+            possible_paths.append(Path(__file__).parent.parent / 'assets' / icon_name)
             # When running from PyInstaller bundle
-            Path(sys.executable).parent / 'assets' / 'icon.png',
-            Path(sys.executable).parent / 'assets' / 'icon.ico',
-        ]
+            possible_paths.append(Path(sys.executable).parent / 'assets' / icon_name)
         
         for icon_path in possible_paths:
             if icon_path.exists():
@@ -878,12 +886,22 @@ def main():
     
     # Set application icon
     from pathlib import Path
-    possible_icon_paths = [
-        Path(__file__).parent.parent / 'assets' / 'icon.png',
-        Path(__file__).parent.parent / 'assets' / 'icon.ico',
-        Path(sys.executable).parent / 'assets' / 'icon.png',
-        Path(sys.executable).parent / 'assets' / 'icon.ico',
-    ]
+    import platform
+    
+    # Choose icon format based on platform
+    system = platform.system()
+    if system == "Darwin":
+        icon_names = ["icon.icns", "icon.png", "icon.ico"]
+    elif system == "Windows":
+        icon_names = ["icon.ico", "icon.png"]
+    else:
+        icon_names = ["icon.png", "icon.icns", "icon.ico"]
+    
+    possible_icon_paths = []
+    for icon_name in icon_names:
+        possible_icon_paths.append(Path(__file__).parent.parent / 'assets' / icon_name)
+        possible_icon_paths.append(Path(sys.executable).parent / 'assets' / icon_name)
+    
     for icon_path in possible_icon_paths:
         if icon_path.exists():
             app.setWindowIcon(QIcon(str(icon_path)))

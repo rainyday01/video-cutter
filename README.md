@@ -296,6 +296,9 @@ python download_ffmpeg.py --check-ffmpeg
 
 ## 更新日志
 
+### v1.1.1
+- 🐛 修复 macOS 构建失败问题（使用 .icns 图标格式）
+
 ### v1.1.0
 - 📹 新增紧凑格式支持（`abcxyz_20260201_090101.mp4`）
 - 🎨 添加程序图标（剪刀图标）

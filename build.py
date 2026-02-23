@@ -128,8 +128,17 @@ def build_pyinstaller(one_file: bool = True, windowed: bool = True):
     else:
         cmd.append("--console")
     
-    # Add icon if exists
-    icon_path = root / "assets" / "icon.ico"
+    # Add icon - use platform-specific format
+    if platform.system() == "Darwin":
+        # macOS requires .icns format
+        icon_path = root / "assets" / "icon.icns"
+    elif platform.system() == "Windows":
+        # Windows uses .ico format
+        icon_path = root / "assets" / "icon.ico"
+    else:
+        # Linux can use .png
+        icon_path = root / "assets" / "icon.png"
+    
     if icon_path.exists():
         cmd.extend(["--icon", str(icon_path)])
     
