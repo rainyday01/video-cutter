@@ -267,6 +267,8 @@ class VideoProcessor:
         task.output_path.parent.mkdir(parents=True, exist_ok=True)
         
         # Build ffmpeg command
+        # NOTE: 移除 -movflags +faststart 以避免编码完成后的额外等待时间
+        # 如果需要流式播放支持，可以在编码完成后用 qt-faststart 工具单独处理
         ffmpeg_path = get_ffmpeg_path()
         cmd = [
             ffmpeg_path,
@@ -279,7 +281,7 @@ class VideoProcessor:
             '-b:v', str(output_bitrate),  # Video bitrate
             '-c:a', 'aac',  # Audio codec
             '-b:a', '128k',  # Audio bitrate
-            '-movflags', '+faststart',  # Enable streaming
+            # '-movflags', '+faststart',  # 移除此选项以避免99%卡住
             '-progress', 'pipe:1',  # Progress output
             str(task.output_path)
         ]
@@ -313,11 +315,29 @@ class VideoProcessor:
             last_progress_log = [0]
             line_count = [0]
             stdout_done = threading.Event()
+            process_finished = threading.Event()  # 新增：进程完成信号
+            last_progress_time = [time.time()]  # 记录最后一次进度更新时间
             
             def read_progress():
                 """Read progress from stdout (runs in thread)."""
                 try:
-                    for line in self._process.stdout:
+                    while True:
+                        # 检查进程是否已完成
+                        if process_finished.is_set():
+                            logger.debug("read_progress: process_finished signaled, draining stdout...")
+                            # 读取剩余数据
+                            for line in self._process.stdout:
+                                line_count[0] += 1
+                            break
+                        
+                        # 非阻塞读取一行
+                        line = self._process.stdout.readline()
+                        if not line:
+                            if process_finished.is_set():
+                                break
+                            time.sleep(0.01)
+                            continue
+                        
                         line_count[0] += 1
                         
                         # Log first few lines
@@ -330,6 +350,7 @@ class VideoProcessor:
                                 out_time_us = int(line.split('=')[1])
                                 progress = min(1.0, out_time_us / 1000000 / duration)
                                 last_progress[0] = progress
+                                last_progress_time[0] = time.time()  # 更新进度时间
                                 task.progress = progress
                                 if progress_callback:
                                     progress_callback(progress)
@@ -355,10 +376,21 @@ class VideoProcessor:
             stderr_output = []
             def read_stderr():
                 try:
-                    for line in self._process.stderr:
+                    while True:
+                        if process_finished.is_set():
+                            # 读取剩余stderr
+                            for line in self._process.stderr:
+                                stderr_output.append(line)
+                            break
+                        line = self._process.stderr.readline()
+                        if not line:
+                            if process_finished.is_set():
+                                break
+                            time.sleep(0.01)
+                            continue
                         stderr_output.append(line)
-                except:
-                    pass
+                except Exception as e:
+                    logger.debug(f"read_stderr error: {e}")
             
             stderr_thread = threading.Thread(target=read_stderr, daemon=True)
             stderr_thread.start()
@@ -366,9 +398,14 @@ class VideoProcessor:
             # Main thread: wait for process to complete
             logger.debug("Waiting for FFmpeg process to complete...")
             
+            # 进度超时检测：如果进度达到95%后30秒没有更新，可能是faststart阶段
+            high_progress_timeout = 30  # 秒
+            normal_timeout = 120  # 正常情况下的超时
+            
             while True:
                 if self._stopped:
                     logger.warning("Task stopped during processing")
+                    process_finished.set()
                     self._process.kill()
                     task.status = "failed"
                     task.error = "Task stopped"
@@ -380,18 +417,39 @@ class VideoProcessor:
                 # Wait for process with 0.5s timeout so we can check _stopped
                 try:
                     return_code = self._process.wait(timeout=0.5)
+                    process_finished.set()
+                    logger.info(f"FFmpeg process finished with return code: {return_code}")
                     break  # Process finished
                 except subprocess.TimeoutExpired:
-                    # Process still running, continue waiting
+                    # Process still running, check for stall detection
+                    time_since_progress = time.time() - last_progress_time[0]
+                    current_progress = last_progress[0]
+                    
+                    # 如果进度>=95%且超过30秒没有更新，记录警告但继续等待
+                    if current_progress >= 0.95 and time_since_progress > high_progress_timeout:
+                        logger.warning(f"Progress stalled at {current_progress*100:.0f}% for {time_since_progress:.0f}s, FFmpeg may be in finalization phase")
+                        # 更新时间戳避免重复日志
+                        last_progress_time[0] = time.time()
+                    
+                    # 如果超过2分钟完全没有进度更新，可能出问题了
+                    if time_since_progress > normal_timeout and current_progress < 0.95:
+                        logger.error(f"No progress for {time_since_progress:.0f}s at {current_progress*100:.0f}%, process may be stuck")
+                        process_finished.set()
+                        self._process.kill()
+                        task.status = "failed"
+                        task.error = f"Process stalled at {current_progress*100:.0f}%"
+                        return False
+                    
                     continue
             
-            logger.info(f"FFmpeg process finished with return code: {return_code}")
-            
-            # Wait for progress thread to finish (with timeout)
-            progress_thread.join(timeout=2.0)
+            # 等待进度线程完成
+            progress_thread.join(timeout=3.0)
+            if progress_thread.is_alive():
+                logger.warning("Progress thread still running after timeout")
             
             # Get stderr output
-            stderr_thread.join(timeout=1.0)
+            process_finished.set()
+            stderr_thread.join(timeout=2.0)
             if stderr_output:
                 stderr_text = ''.join(stderr_output)
                 logger.debug(f"FFmpeg stderr: {stderr_text[:1000]}")
@@ -405,8 +463,8 @@ class VideoProcessor:
                 return True
             else:
                 task.status = "failed"
-                stderr = self._process.stderr.read() if self._process.stderr else ""
-                task.error = stderr[:500] if stderr else "Unknown error"
+                stderr = ''.join(stderr_output) if stderr_output else ""
+                task.error = stderr[:500] if stderr else f"FFmpeg exit code: {return_code}"
                 logger.error(f"FFmpeg failed: {task.error}")
                 return False
                 
