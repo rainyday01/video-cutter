@@ -34,6 +34,7 @@ class ClipTask:
     status: str = "pending"  # pending, processing, completed, failed, skipped
     progress: float = 0.0
     error: str | None = None
+    retry_count: int = 0  # 重试次数
 
 
 @dataclass
@@ -141,6 +142,10 @@ def get_video_info(video_path: Path) -> VideoInfo | None:
 class VideoProcessor:
     """Handles video cutting operations."""
     
+    # 超时配置
+    STALL_TIMEOUT = 10  # 进程卡住超时时间（秒）
+    MAX_RETRIES = 3     # 最大重试次数
+    
     def __init__(self):
         self._process: subprocess.Popen | None = None
         self._paused: bool = False
@@ -221,6 +226,205 @@ class VideoProcessor:
         delta = clip_start - video.start_time
         return delta.total_seconds()
     
+    def _run_ffmpeg_once(
+        self,
+        task: ClipTask,
+        quality: QualitySettings,
+        progress_callback: Callable[[float], None] | None = None,
+        log_callback: Callable[[str], None] | None = None
+    ) -> tuple[bool, str]:
+        """
+        执行一次FFmpeg剪辑任务。
+        
+        Returns:
+            (success, error_message)
+            success=True 表示成功
+            success=False 且 error_message="STALLED" 表示卡住需要重试
+        """
+        from .logger import get_logger
+        logger = get_logger()
+        
+        video = task.video_info
+        
+        # Calculate seek time and duration
+        seek_time = self.calculate_seek_time(video, task.clip_start)
+        duration = (task.clip_end - task.clip_start).total_seconds()
+        
+        # Calculate output bitrate
+        output_bitrate = int(video.bitrate * quality.bitrate_ratio)
+        
+        # Ensure output directory exists
+        task.output_path.parent.mkdir(parents=True, exist_ok=True)
+        
+        # Build ffmpeg command - 不使用 -movflags +faststart
+        ffmpeg_path = get_ffmpeg_path()
+        cmd = [
+            ffmpeg_path,
+            '-y',  # Overwrite output
+            '-ss', str(seek_time),  # Seek to start
+            '-i', str(video.path),  # Input file
+            '-t', str(duration),  # Duration
+            '-c:v', 'libx264',  # Video codec
+            '-preset', 'medium',  # Encoding speed
+            '-b:v', str(output_bitrate),  # Video bitrate
+            '-c:a', 'aac',  # Audio codec
+            '-b:a', '128k',  # Audio bitrate
+            '-progress', 'pipe:1',  # Progress output
+            str(task.output_path)
+        ]
+        
+        logger.debug(f"FFmpeg command: {' '.join(cmd)}")
+        
+        # Prepare subprocess arguments
+        # 使用 errors='replace' 避免编码错误
+        popen_kwargs = {
+            'stdout': subprocess.PIPE,
+            'stderr': subprocess.PIPE,
+            'text': True,
+            'errors': 'replace',  # 替换无法解码的字符
+            'encoding': 'utf-8'
+        }
+        if platform.system() == 'Windows':
+            popen_kwargs['creationflags'] = subprocess.CREATE_NO_WINDOW
+        
+        try:
+            self._process = subprocess.Popen(cmd, **popen_kwargs)
+            logger.info(f"FFmpeg process started (PID: {self._process.pid})")
+            
+            task.status = "processing"
+            
+            import threading
+            import time
+            
+            last_progress = [0.0]
+            last_progress_log = [0]
+            line_count = [0]
+            process_finished = threading.Event()
+            last_activity_time = [time.time()]  # 记录最后一次活动时间
+            stalled = [False]  # 是否卡住
+            
+            def read_progress():
+                """Read progress from stdout."""
+                try:
+                    while True:
+                        if process_finished.is_set():
+                            for line in self._process.stdout:
+                                line_count[0] += 1
+                            break
+                        
+                        line = self._process.stdout.readline()
+                        if not line:
+                            if process_finished.is_set():
+                                break
+                            time.sleep(0.01)
+                            continue
+                        
+                        line_count[0] += 1
+                        last_activity_time[0] = time.time()  # 更新活动时间
+                        
+                        if line_count[0] <= 10:
+                            logger.debug(f"FFmpeg output line {line_count[0]}: {line.strip()}")
+                        
+                        if line.startswith('out_time_ms'):
+                            try:
+                                out_time_us = int(line.split('=')[1])
+                                progress = min(1.0, out_time_us / 1000000 / duration)
+                                last_progress[0] = progress
+                                task.progress = progress
+                                if progress_callback:
+                                    progress_callback(progress)
+                                
+                                progress_pct = int(progress * 100)
+                                if progress_pct >= last_progress_log[0] + 10:
+                                    logger.debug(f"Progress: {progress_pct}%")
+                                    last_progress_log[0] = progress_pct
+                            except (ValueError, ZeroDivisionError):
+                                pass
+                except Exception as e:
+                    logger.debug(f"read_progress error: {e}")
+                finally:
+                    logger.debug(f"Progress thread done, total lines: {line_count[0]}")
+            
+            progress_thread = threading.Thread(target=read_progress, daemon=True)
+            progress_thread.start()
+            
+            # 读取stderr（但不阻塞）
+            stderr_output = []
+            def read_stderr():
+                try:
+                    while True:
+                        if process_finished.is_set():
+                            for line in self._process.stderr:
+                                stderr_output.append(line)
+                            break
+                        line = self._process.stderr.readline()
+                        if not line:
+                            if process_finished.is_set():
+                                break
+                            time.sleep(0.01)
+                            continue
+                        stderr_output.append(line)
+                        last_activity_time[0] = time.time()
+                except Exception as e:
+                    logger.debug(f"read_stderr error: {e}")
+            
+            stderr_thread = threading.Thread(target=read_stderr, daemon=True)
+            stderr_thread.start()
+            
+            logger.debug(f"Waiting for FFmpeg (stall timeout: {self.STALL_TIMEOUT}s)...")
+            
+            while True:
+                if self._stopped:
+                    logger.warning("Task stopped by user")
+                    process_finished.set()
+                    self._process.kill()
+                    return (False, "STOPPED")
+                
+                while self._paused:
+                    time.sleep(0.1)
+                
+                # 检查是否卡住
+                time_since_activity = time.time() - last_activity_time[0]
+                if time_since_activity > self.STALL_TIMEOUT:
+                    logger.warning(f"Process stalled for {time_since_activity:.0f}s, killing...")
+                    process_finished.set()
+                    self._process.kill()
+                    stalled[0] = True
+                    return (False, "STALLED")
+                
+                # 等待进程
+                try:
+                    return_code = self._process.wait(timeout=0.5)
+                    process_finished.set()
+                    logger.info(f"FFmpeg finished with return code: {return_code}")
+                    break
+                except subprocess.TimeoutExpired:
+                    continue
+            
+            # 等待线程
+            progress_thread.join(timeout=2.0)
+            stderr_thread.join(timeout=1.0)
+            
+            if return_code == 0:
+                task.status = "completed"
+                task.progress = 1.0
+                if progress_callback:
+                    progress_callback(1.0)
+                logger.info(f"Successfully created: {task.output_path.name}")
+                return (True, "")
+            else:
+                stderr = ''.join(stderr_output) if stderr_output else ""
+                error_msg = stderr[:500] if stderr else f"FFmpeg exit code: {return_code}"
+                logger.error(f"FFmpeg failed: {error_msg}")
+                return (False, error_msg)
+                
+        except Exception as e:
+            logger.exception(f"Exception during FFmpeg: {str(e)}")
+            return (False, str(e))
+        finally:
+            logger.debug("FFmpeg run completed")
+            self._process = None
+    
     def cut_clip(
         self,
         task: ClipTask,
@@ -229,7 +433,7 @@ class VideoProcessor:
         log_callback: Callable[[str], None] | None = None
     ) -> bool:
         """
-        Cut a video clip using ffmpeg.
+        Cut a video clip using ffmpeg with automatic retry on stall.
         
         Args:
             task: ClipTask to process
@@ -254,228 +458,55 @@ class VideoProcessor:
         logger.info(f"  Source: {video.path}")
         logger.info(f"  Clip times: {task.clip_start} ~ {task.clip_end}")
         
-        # Calculate seek time and duration
+        # Calculate seek time and duration for logging
         seek_time = self.calculate_seek_time(video, task.clip_start)
         duration = (task.clip_end - task.clip_start).total_seconds()
-        
         logger.info(f"  Seek time: {seek_time:.2f}s, Duration: {duration:.2f}s")
-        
-        # Calculate output bitrate
-        output_bitrate = int(video.bitrate * quality.bitrate_ratio)
-        
-        # Ensure output directory exists
-        task.output_path.parent.mkdir(parents=True, exist_ok=True)
-        
-        # Build ffmpeg command
-        # NOTE: 移除 -movflags +faststart 以避免编码完成后的额外等待时间
-        # 如果需要流式播放支持，可以在编码完成后用 qt-faststart 工具单独处理
-        ffmpeg_path = get_ffmpeg_path()
-        cmd = [
-            ffmpeg_path,
-            '-y',  # Overwrite output
-            '-ss', str(seek_time),  # Seek to start
-            '-i', str(video.path),  # Input file
-            '-t', str(duration),  # Duration
-            '-c:v', 'libx264',  # Video codec
-            '-preset', 'medium',  # Encoding speed
-            '-b:v', str(output_bitrate),  # Video bitrate
-            '-c:a', 'aac',  # Audio codec
-            '-b:a', '128k',  # Audio bitrate
-            # '-movflags', '+faststart',  # 移除此选项以避免99%卡住
-            '-progress', 'pipe:1',  # Progress output
-            str(task.output_path)
-        ]
-        
-        logger.debug(f"FFmpeg command: {' '.join(cmd)}")
         
         if log_callback:
             log_callback(f"开始生成: {task.description}.mp4")
         
-        # Prepare subprocess arguments - hide console on Windows
-        popen_kwargs = {
-            'stdout': subprocess.PIPE,
-            'stderr': subprocess.PIPE,
-            'text': True
-        }
-        if platform.system() == 'Windows':
-            popen_kwargs['creationflags'] = subprocess.CREATE_NO_WINDOW
-        
-        try:
-            self._process = subprocess.Popen(cmd, **popen_kwargs)
-            logger.info(f"FFmpeg process started (PID: {self._process.pid})")
+        # 带重试的执行
+        retry_count = 0
+        while retry_count <= self.MAX_RETRIES:
+            if retry_count > 0:
+                logger.warning(f"Retry {retry_count}/{self.MAX_RETRIES} for: {task.description}")
+                if log_callback:
+                    log_callback(f"重试 ({retry_count}/{self.MAX_RETRIES}): {task.description}")
+                task.retry_count = retry_count
             
-            task.status = "processing"
+            success, error = self._run_ffmpeg_once(task, quality, progress_callback, log_callback)
             
-            # Strategy: Read stdout in a thread, update progress via shared variable
-            # Main thread waits for process to complete
-            import threading
-            import time
-            
-            last_progress = [0.0]  # Use list for mutable reference
-            last_progress_log = [0]
-            line_count = [0]
-            stdout_done = threading.Event()
-            process_finished = threading.Event()  # 新增：进程完成信号
-            last_progress_time = [time.time()]  # 记录最后一次进度更新时间
-            
-            def read_progress():
-                """Read progress from stdout (runs in thread)."""
-                try:
-                    while True:
-                        # 检查进程是否已完成
-                        if process_finished.is_set():
-                            logger.debug("read_progress: process_finished signaled, draining stdout...")
-                            # 读取剩余数据
-                            for line in self._process.stdout:
-                                line_count[0] += 1
-                            break
-                        
-                        # 非阻塞读取一行
-                        line = self._process.stdout.readline()
-                        if not line:
-                            if process_finished.is_set():
-                                break
-                            time.sleep(0.01)
-                            continue
-                        
-                        line_count[0] += 1
-                        
-                        # Log first few lines
-                        if line_count[0] <= 10:
-                            logger.debug(f"FFmpeg output line {line_count[0]}: {line.strip()}")
-                        
-                        # Parse progress
-                        if line.startswith('out_time_ms'):
-                            try:
-                                out_time_us = int(line.split('=')[1])
-                                progress = min(1.0, out_time_us / 1000000 / duration)
-                                last_progress[0] = progress
-                                last_progress_time[0] = time.time()  # 更新进度时间
-                                task.progress = progress
-                                if progress_callback:
-                                    progress_callback(progress)
-                                
-                                # Log progress every 10%
-                                progress_pct = int(progress * 100)
-                                if progress_pct >= last_progress_log[0] + 10:
-                                    logger.debug(f"Progress: {progress_pct}%")
-                                    last_progress_log[0] = progress_pct
-                            except (ValueError, ZeroDivisionError):
-                                pass
-                except Exception as e:
-                    logger.debug(f"read_progress error: {e}")
-                finally:
-                    stdout_done.set()
-                    logger.info(f"Progress thread done, total lines: {line_count[0]}")
-            
-            # Start progress reader thread
-            progress_thread = threading.Thread(target=read_progress, daemon=True)
-            progress_thread.start()
-            
-            # Read stderr in background
-            stderr_output = []
-            def read_stderr():
-                try:
-                    while True:
-                        if process_finished.is_set():
-                            # 读取剩余stderr
-                            for line in self._process.stderr:
-                                stderr_output.append(line)
-                            break
-                        line = self._process.stderr.readline()
-                        if not line:
-                            if process_finished.is_set():
-                                break
-                            time.sleep(0.01)
-                            continue
-                        stderr_output.append(line)
-                except Exception as e:
-                    logger.debug(f"read_stderr error: {e}")
-            
-            stderr_thread = threading.Thread(target=read_stderr, daemon=True)
-            stderr_thread.start()
-            
-            # Main thread: wait for process to complete
-            logger.debug("Waiting for FFmpeg process to complete...")
-            
-            # 进度超时检测：如果进度达到95%后30秒没有更新，可能是faststart阶段
-            high_progress_timeout = 30  # 秒
-            normal_timeout = 120  # 正常情况下的超时
-            
-            while True:
-                if self._stopped:
-                    logger.warning("Task stopped during processing")
-                    process_finished.set()
-                    self._process.kill()
-                    task.status = "failed"
-                    task.error = "Task stopped"
-                    return False
-                
-                while self._paused:
-                    time.sleep(0.1)
-                
-                # Wait for process with 0.5s timeout so we can check _stopped
-                try:
-                    return_code = self._process.wait(timeout=0.5)
-                    process_finished.set()
-                    logger.info(f"FFmpeg process finished with return code: {return_code}")
-                    break  # Process finished
-                except subprocess.TimeoutExpired:
-                    # Process still running, check for stall detection
-                    time_since_progress = time.time() - last_progress_time[0]
-                    current_progress = last_progress[0]
-                    
-                    # 如果进度>=95%且超过30秒没有更新，记录警告但继续等待
-                    if current_progress >= 0.95 and time_since_progress > high_progress_timeout:
-                        logger.warning(f"Progress stalled at {current_progress*100:.0f}% for {time_since_progress:.0f}s, FFmpeg may be in finalization phase")
-                        # 更新时间戳避免重复日志
-                        last_progress_time[0] = time.time()
-                    
-                    # 如果超过2分钟完全没有进度更新，可能出问题了
-                    if time_since_progress > normal_timeout and current_progress < 0.95:
-                        logger.error(f"No progress for {time_since_progress:.0f}s at {current_progress*100:.0f}%, process may be stuck")
-                        process_finished.set()
-                        self._process.kill()
-                        task.status = "failed"
-                        task.error = f"Process stalled at {current_progress*100:.0f}%"
-                        return False
-                    
-                    continue
-            
-            # 等待进度线程完成
-            progress_thread.join(timeout=3.0)
-            if progress_thread.is_alive():
-                logger.warning("Progress thread still running after timeout")
-            
-            # Get stderr output
-            process_finished.set()
-            stderr_thread.join(timeout=2.0)
-            if stderr_output:
-                stderr_text = ''.join(stderr_output)
-                logger.debug(f"FFmpeg stderr: {stderr_text[:1000]}")
-            
-            if return_code == 0:
+            if success:
                 task.status = "completed"
-                task.progress = 1.0
-                if progress_callback:
-                    progress_callback(1.0)
-                logger.info(f"Successfully created: {task.output_path.name}")
                 return True
-            else:
+            
+            if error == "STOPPED":
                 task.status = "failed"
-                stderr = ''.join(stderr_output) if stderr_output else ""
-                task.error = stderr[:500] if stderr else f"FFmpeg exit code: {return_code}"
-                logger.error(f"FFmpeg failed: {task.error}")
+                task.error = "Task stopped by user"
                 return False
-                
-        except Exception as e:
-            logger.exception(f"Exception during cut_clip: {str(e)}")
+            
+            if error == "STALLED":
+                retry_count += 1
+                if retry_count <= self.MAX_RETRIES:
+                    logger.info(f"Process stalled, will retry...")
+                    import time
+                    time.sleep(1)  # 短暂等待后重试
+                    continue
+                else:
+                    task.status = "failed"
+                    task.error = f"Process stalled after {self.MAX_RETRIES} retries"
+                    logger.error(task.error)
+                    return False
+            
+            # 其他错误
             task.status = "failed"
-            task.error = str(e)
+            task.error = error
             return False
-        finally:
-            logger.debug("cut_clip finally block executed")
-            self._process = None
+        
+        task.status = "failed"
+        task.error = "Max retries exceeded"
+        return False
     
     def pause(self):
         """Pause current task."""
@@ -494,6 +525,5 @@ class VideoProcessor:
     def reset(self):
         """Reset processor state."""
         self._paused = False
-        self._stopped = False  # Important: reset stopped flag
-        self._process = None
         self._stopped = False
+        self._process = None
